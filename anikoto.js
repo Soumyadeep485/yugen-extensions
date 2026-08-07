@@ -208,15 +208,25 @@ globalThis.Extension = (function() {
                             "X-Requested-With": "XMLHttpRequest"
                         });
                         const embedJson = JSON.parse(embedAjax);
-                        let embedUrl = embedJson.result.url;
+                        let embedUrl = embedJson.result.url || embedJson.result.link;
                         if (embedUrl.startsWith('//')) embedUrl = "https:" + embedUrl;
                         
                         const embedHost = embedUrl.split('/').slice(0, 3).join('/'); 
-                        const embedHtml = await nativeFetch(embedUrl, { "Referer": BASE_URL + "/" });
                         
-                        const streamIdMatch = embedHtml.match(/data-id="([^"]+)"/);
-                        if (!streamIdMatch) continue;
-                        const streamId = streamIdMatch[1];
+                        // 🚀 THE FIX: Extract true ID directly from the embed URL
+                        let streamId = embedUrl.split('/').pop().split('?')[0];
+                        
+                        // Fallback ONLY if the URL didn't contain an ID
+                        if (!streamId || streamId.length < 5) {
+                            const embedHtml = await nativeFetch(embedUrl, { "Referer": BASE_URL + "/" });
+                            const streamIdMatch = embedHtml.match(/data-id="([^"]+)"/);
+                            if (streamIdMatch) {
+                                streamId = streamIdMatch[1];
+                            }
+                        }
+                        
+                        // If we STILL don't have a valid ID, skip this server to avoid crashing
+                        if (!streamId) continue;
                         
                         let apiUrl = `${embedHost}/stream/getSources?id=${streamId}&id=${streamId}`;
                         let apiResponse = await nativeFetch(apiUrl, {
