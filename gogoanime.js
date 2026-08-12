@@ -1,99 +1,97 @@
 // GogoAnime (Anitaku) Extension for Yugen
-// Features: AnimeDex API + Pure Native MP4 AES-Bypass
+// 100% Pure Native HTML Scraper (No APIs, No Proxies, No AES)
 const GOGOANIME = {
   name: 'GogoAnime',
   pkgName: 'com.gogoanime',
-  version: '1.0.7',
+  version: '1.0.8',
   lang: 'EN',
   baseURL: 'https://anitaku.com.ro',
 
-  async _fetch(url) {
-      try { 
-          const res = await nativeFetch(url); 
-          if (res) return res;
-      } catch(e) {}
-      
-      // Bypass ISP/SSL blocks via proxy
-      try { 
-          return await nativeFetch('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url)); 
-      } catch(e) {
-          throw new Error("Network completely blocked.");
-      }
-  },
-
   async search(query) {
-      try {
-          const res = await this._fetch(`https://api.animedex.vip/search?query=${encodeURIComponent(query)}`);
-          const json = JSON.parse(res);
-          return json.results.map(i => ({ title: i.title, poster: i.image, url: i.id }));
-      } catch(e) { return []; }
+    try {
+      const html = await nativeFetch(`${this.baseURL}/search.html?keyword=${encodeURIComponent(query)}`);
+      const results = [];
+      const regex = /<div class="img">\s*<a href="\/category\/([^"]+)" title="([^"]+)">\s*<img src="([^"]+)"/gi;
+      let match;
+      while ((match = regex.exec(html)) !== null) {
+        results.push({ url: match[1], title: match[2], poster: match[3] });
+      }
+      return results;
+    } catch(e) { return []; }
   },
 
   async getEpisodes(slug) {
-      try {
-          const res = await this._fetch(`https://api.animedex.vip/anime/${slug}`);
-          const json = JSON.parse(res);
-          return json.results.episodes.map(e => ({ 
-              id: e[1], // Episode ID from AnimeDex
-              number: e[0], 
-              title: `Episode ${e[0]}` 
-          }));
-      } catch(e) { return []; }
+    try {
+      const html = await nativeFetch(`${this.baseURL}/category/${slug}`);
+      const epRegex = /ep_end="(\d+)"/i;
+      const match = epRegex.exec(html);
+      const maxEp = match ? parseInt(match[1]) : 1;
+      const eps = [];
+      for (let i = 1; i <= maxEp; i++) {
+          eps.push({ id: `${slug}/ep-${i}`, number: i, title: `Episode ${i}` });
+      }
+      return eps;
+    } catch(e) { return []; }
   },
 
   async getEpisodeCount(slug) {
-      const eps = await this.getEpisodes(slug);
-      return eps.length || 1;
+    const eps = await this.getEpisodes(slug);
+    return eps.length || 1;
   },
 
   async extractStreams(epId, title) {
-      let slug = epId.split('/ep-')[0];
-      let epNum = epId.split('/ep-')[1] || '1';
-      const streams = [];
+    let slug = epId.split('/ep-')[0];
+    let epNum = epId.split('/ep-')[1] || '1';
 
-      // METHOD 1: AnimeDex API (Fast M3U8)
-      try {
-          const dexRes = await this._fetch(`https://api.animedex.vip/episode/${slug}-episode-${epNum}`);
-          const json = JSON.parse(dexRes);
-          if (json.results && json.results.stream && json.results.stream.sources) {
-              json.results.stream.sources.forEach(s => {
-                  streams.push({
-                      quality: `[SUB] Gogo M3U8 - Auto`,
-                      url: s.file,
-                      isM3U8: true,
-                      headers: {"Referer": "https://gogoplay.io/"},
-                      subtitles: []
-                  });
-              });
-              if (streams.length > 0) return streams; 
-          }
-      } catch(e) { console.log("[GogoAnime] API Failed, deploying native fallback..."); }
+    try {
+        // 1. Fetch Episode Page & Handle 404 Slug Mismatches natively
+        let epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
+        
+        if (epHtml.includes('error-404') || epHtml.includes('404 Not Found') || epHtml.includes('Page not found')) {
+            console.log("[GogoAnime] Slug mismatch. Deploying Smart Search fallback...");
+            const query = (title || slug).replace(/[-_:]/g, ' ').split(' ').slice(0, 2).join(' ');
+            const searchRes = await this.search(query);
+            
+            if (searchRes.length > 0) {
+                slug = searchRes[0].url;
+                epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
+            } else {
+                return [];
+            }
+        }
 
-      // METHOD 2: The Direct MP4 Bypass (No AES required!)
-      try {
-          const epHtml = await this._fetch(`${this.baseURL}/${slug}-episode-${epNum}`);
-          const dlMatch = epHtml.match(/<li class="dowloads"><a href="([^"]+)"/i);
-          
-          if (dlMatch) {
-              const dlHtml = await this._fetch(dlMatch[1]);
-              const linkRegex = /<a href="([^"]+)"[^>]*>Download\s*\(([^)]+)\)/gi;
-              let match;
-              while ((match = linkRegex.exec(dlHtml)) !== null) {
-                  // Skip captcha-locked links
-                  if (!match[1].includes('captcha')) {
-                      streams.push({
-                          quality: `[SUB] MP4 Direct - ${match[2].trim()}`,
-                          url: match[1],
-                          isM3U8: false,
-                          headers: {},
-                          subtitles: []
-                      });
-                  }
-              }
-          }
-      } catch(e) { console.log("[GogoAnime] Native HTML Bypass Failed.", e); }
-
-      return streams;
+        const streams = [];
+        
+        // 2. Extract the hidden Download Page URL
+        const dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
+        if (dlMatch) {
+            const dlUrl = dlMatch[1].startsWith('//') ? 'https:' + dlMatch[1] : dlMatch[1];
+            const dlHtml = await nativeFetch(dlUrl);
+            
+            // 3. Scrape the pure, unencrypted .mp4 links!
+            const linkRegex = /<a href="([^"]+)"[^>]*>\s*Download[\s\S]*?\(([^)]+)\)/gi;
+            let match;
+            while ((match = linkRegex.exec(dlHtml)) !== null) {
+                const link = match[1].replace(/&amp;/g, '&');
+                const qual = match[2].trim();
+                
+                // Skip captcha locks and invalid links
+                if (!link.includes('captcha') && link.startsWith('http')) {
+                    streams.push({
+                        quality: `[SUB] MP4 - ${qual}`,
+                        url: link,
+                        isM3U8: link.includes('.m3u8'),
+                        headers: {"Referer": this.baseURL + "/"},
+                        subtitles: []
+                    });
+                }
+            }
+        }
+        return streams;
+    } catch(e) {
+        console.error("[GogoAnime] Native Scraper Error:", e);
+        return [];
+    }
   }
 };
 
