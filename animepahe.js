@@ -1,84 +1,137 @@
 // AnimePahe Extension for Yugen
-// Utilizing the Premium Hisoka API Network to bypass Cloudflare
+// Pure Native Kwik Unpacker with JSON Smuggling
 const ANIMEPAHE = {
   name: 'AnimePahe',
   pkgName: 'ru.animepahe',
-  version: '1.1.1',
+  version: '1.1.2',
   lang: 'EN',
-  
-  apiHosts: [
-      'https://anime-api.hisoka.dev/anime/animepahe',
-      'https://api-consumet.marie-fd.me/anime/animepahe',
-      'https://api.consumet.org/anime/animepahe'
-  ],
+  baseURL: 'https://animepahe.ru',
 
-  async _api(endpoint) {
-    for (let host of this.apiHosts) {
-      try {
-        const res = await nativeFetch(host + endpoint);
-        // Skip Cloudflare HTML payloads
-        if (!res.trim().startsWith('<')) {
-          const json = JSON.parse(res);
-          if (json && !json.message) return json;
-        }
-      } catch(e) {}
-    }
-    throw new Error("All Premium API instances blocked.");
+  async _fetchJson(url) {
+    try {
+      const res = await nativeFetch(url, { 'Referer': this.baseURL });
+      if (res && res.length > 50 && !res.includes('<html')) return JSON.parse(res);
+    } catch(e) {}
+
+    console.log("[AnimePahe] JSON blocked. Smuggling via AllOrigins...");
+    try {
+      const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+      const proxyRes = await nativeFetch(proxyUrl);
+      const wrapper = JSON.parse(proxyRes);
+      return JSON.parse(wrapper.contents);
+    } catch(e) { throw new Error("Data block impenetrable."); }
+  },
+
+  async _fetchHtml(url) {
+    try {
+      const res = await nativeFetch(url, { 'Referer': this.baseURL });
+      if (res && !res.includes('Just a moment')) return res;
+    } catch(e) {}
+
+    try {
+      const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+      const proxyRes = await nativeFetch(proxyUrl);
+      return JSON.parse(proxyRes).contents;
+    } catch(e) { throw new Error("HTML block impenetrable."); }
   },
 
   async search(query) {
     try {
-      const res = await this._api(`/${encodeURIComponent(query)}`);
-      return res.results.map(i => ({ title: i.title, poster: i.image, url: i.id }));
+      const data = await this._fetchJson(`${this.baseURL}/api?m=search&q=${encodeURIComponent(query)}`);
+      if (!data || !data.data) return [];
+      return data.data.map(i => ({ title: i.title, poster: i.poster, url: i.session }));
     } catch(e) { return []; }
   },
 
-  async getEpisodes(slug) {
+  async getEpisodes(session) {
     try {
-      const res = await this._api(`/info/${slug}`);
-      return res.episodes.map(e => ({ 
-          id: `${slug}|${e.id}`, 
-          number: e.number, 
-          title: `Episode ${e.number}` 
-      }));
+      const data = await this._fetchJson(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
+      if (!data || !data.data) return [];
+      
+      const episodes = [];
+      const maxPages = data.last_page || 1;
+      for (let p = 1; p <= maxPages; p++) {
+          let pageData = p === 1 ? data : await this._fetchJson(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=${p}`);
+          if (pageData && pageData.data) {
+              pageData.data.forEach(ep => {
+                  episodes.push({ id: `${session}|${ep.session}`, number: ep.episode, title: `Episode ${ep.episode}` });
+              });
+          }
+      }
+      return episodes;
     } catch(e) { return []; }
   },
 
-  async getEpisodeCount(slug) {
-    const eps = await this.getEpisodes(slug);
-    return eps.length || 1;
+  async getEpisodeCount(session) {
+    try {
+      const data = await this._fetchJson(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
+      return data ? (data.total || 0) : 0;
+    } catch(e) { return 0; }
+  },
+
+  _unpack(code) {
+      const argsMatch = code.match(/}\('(.*?)', *(\d+), *(\d+), *'(.*?)'\.split\('\|'\)/);
+      if (!argsMatch) return code;
+      let p = argsMatch[1];
+      let a = parseInt(argsMatch[2]);
+      let c = parseInt(argsMatch[3]);
+      let k = argsMatch[4].split('|');
+      let e = function(c) { return (c < a ? '' : e(parseInt(c / a))) + ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36)); };
+      while (c--) if (k[c]) p = p.replace(new RegExp('\\b' + e(c) + '\\b', 'g'), k[c]);
+      return p;
   },
 
   async extractStreams(epId, title) {
-    let epGuid = epId.includes('|') ? epId.split('|')[1] : null;
-    const epNum = parseInt(epId.split('/ep-')[1] || epId.split('|')[0].split('-').pop() || '1');
-    
-    if (!epGuid) {
-      const rawString = title || epId.split('/ep-')[0];
-      const shortQuery = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
-      
-      const searchResults = await this.search(shortQuery);
-      if (searchResults.length > 0) {
-        const info = await this._api(`/info/${searchResults[0].url}`);
-        const targetEp = info.episodes.find(e => e.number === epNum);
-        if (targetEp) epGuid = targetEp.id;
-      }
-    }
-    
-    if (!epGuid) return [];
-
     try {
-      const res = await this._api(`/watch/${epGuid}`);
-      return res.sources.map(s => ({ 
-          quality: `[SUB] Kwik - ${s.quality || 'Auto'}`, 
-          url: s.url, 
-          isM3U8: s.isM3U8, 
-          headers: {"Referer": "https://kwik.cx/"}, 
-          subtitles: [] 
-      }));
+        let safeSession = epId.includes('|') ? epId.split('|')[1] : null;
+        
+        if (!safeSession) {
+            const rawString = title || epId.split('/ep-')[0];
+            const query = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
+            
+            const searchResults = await this.search(query);
+            if (!searchResults || searchResults.length === 0) return [];
+            
+            const epNum = parseInt(epId.split('/ep-')[1]) || 1;
+            const eps = await this.getEpisodes(searchResults[0].url);
+            const target = eps.find(e => e.number === epNum);
+            if (!target) return [];
+            safeSession = target.id.split('|')[1];
+        }
+
+        const data = await this._fetchJson(`${this.baseURL}/api?m=embed&id=${safeSession}`);
+        const streams = [];
+        
+        if (data && data.data) {
+            for (const provider of Object.keys(data.data)) {
+                for (const linkObj of Object.values(data.data[provider])) {
+                    const kwikUrl = linkObj.kwik; 
+                    const quality = linkObj.resolution + 'p ' + (linkObj.audio === 'jpn' ? 'SUB' : 'DUB');
+                    
+                    try {
+                        const kwikHtml = await this._fetchHtml(kwikUrl);
+                        const evalMatch = kwikHtml.match(/eval\(function\(p,a,c,k,e,d\).*?\)\)/);
+                        if (evalMatch) {
+                            const unpacked = this._unpack(evalMatch[0]);
+                            const sourceMatch = unpacked.match(/const source='([^']+)'/);
+                            if (sourceMatch) {
+                                streams.push({
+                                    quality: `[Kwik] ${quality}`,
+                                    url: sourceMatch[1],
+                                    isM3U8: sourceMatch[1].includes('.m3u8'),
+                                    headers: { "Referer": "https://kwik.cx/" },
+                                    subtitles: []
+                                });
+                            }
+                        }
+                    } catch (e) {}
+                }
+            }
+        }
+        return streams;
     } catch(e) { return []; }
   }
 };
 
-window.extensions = window.extensions || {}; 
+window.extensions = window.extensions || {};
 window.extensions[ANIMEPAHE.pkgName] = ANIMEPAHE;
