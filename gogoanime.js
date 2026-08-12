@@ -1,9 +1,9 @@
 // GogoAnime (Anitaku) Extension for Yugen
-// 100% Pure Native HTML Scraper (No APIs, No Proxies, No AES)
+// Pure Native MP4 Scraper (Catches 404 Exceptions to trigger Smart Fallback)
 const GOGOANIME = {
   name: 'GogoAnime',
   pkgName: 'com.gogoanime',
-  version: '1.0.9',
+  version: '1.1.0',
   lang: 'EN',
   baseURL: 'https://anitaku.com.ro',
 
@@ -42,40 +42,53 @@ const GOGOANIME = {
   async extractStreams(epId, title) {
     let slug = epId.split('/ep-')[0];
     let epNum = epId.split('/ep-')[1] || '1';
+    let epHtml = "";
 
     try {
-        let epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
-        let dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
+        // Attempt to fetch direct AniList slug. If it 404s, Dart throws an exception!
+        epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
+    } catch(e) {
+        console.log("[GogoAnime] 404 Exception caught. Bad slug.");
+        epHtml = ""; 
+    }
+
+    let dlMatch = epHtml ? epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i) : null;
+    
+    // 🚀 SMART FALLBACK: Activated if the page 404'd or the download button is missing
+    if (!dlMatch) {
+        console.log("[GogoAnime] Deploying Smart Search fallback...");
+        const rawString = title || slug;
+        // Strip down to the first two words (e.g., "Mushoku Tensei")
+        const query = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
         
-        // 🚀 BULLETPROOF FALLBACK: If the download button is missing, the slug is wrong. 
-        if (!dlMatch) {
-            console.log("[GogoAnime] Missing download link (404). Deploying Smart Search fallback...");
-            const rawString = title || slug;
-            const query = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
+        const searchRes = await this.search(query);
+        if (searchRes.length > 0) {
+            // Find the best match, preferring "season", "part", or just the first result
+            const bestMatch = searchRes.find(r => r.url.includes('season') || r.url.includes(epNum)) || searchRes[0];
+            slug = bestMatch.url; 
             
-            const searchRes = await this.search(query);
-            if (searchRes.length > 0) {
-                slug = searchRes[0].url; // Grab the true GogoAnime slug
+            try {
                 epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
                 dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
-            }
+            } catch(e) { return []; }
         }
+    }
 
-        if (!dlMatch) return []; // Fallback failed
+    if (!dlMatch) return []; 
 
+    try {
         const streams = [];
-        
-        // Scrape the pure, unencrypted .mp4 links directly from the download page!
         const dlUrl = dlMatch[1].startsWith('//') ? 'https:' + dlMatch[1] : dlMatch[1];
         const dlHtml = await nativeFetch(dlUrl);
         
+        // Extract pure MP4s from the download page
         const linkRegex = /<a href="([^"]+)"[^>]*>\s*Download[\s\S]*?\(([^)]+)\)/gi;
         let match;
         while ((match = linkRegex.exec(dlHtml)) !== null) {
             const link = match[1].replace(/&amp;/g, '&');
             const qual = match[2].trim();
             
-            // Skip captcha-locked links
+            // Exclude captcha gates, include pure MP4s
             if (!link.includes('captcha') && link.startsWith('http')) {
                 streams.push({
                     quality: `[SUB] MP4 Direct - ${qual}`,
