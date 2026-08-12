@@ -60,8 +60,7 @@ const GOGOANIME = {
     return episodes;
   },
 
-  async extractStreams(episodeId, animeTitle) {
-    // episodeId is like "bleach/ep-1"
+    async extractStreams(episodeId, animeTitle) {
     const parts = episodeId.split('/ep-');
     const slug = parts[0];
     const epNum = parts[1];
@@ -71,41 +70,7 @@ const GOGOANIME = {
     
     const streams = [];
 
-    // 1. Find Download Links (MP4 direct)
-    const downloadPageMatch = html.match(/class="cf-download"[\s\S]*?href="([^"]+)"/i);
-    if (downloadPageMatch) {
-        let downloadUrl = downloadPageMatch[1];
-        if (downloadUrl.startsWith('/')) {
-            downloadUrl = this.baseURL + downloadUrl;
-        }
-        
-        try {
-            const dlHtml = await nativeFetch(downloadUrl);
-            const dlRegex = /<div class="dowload">[\s\S]*?<a href="([^"]+)"[\s\S]*?>([\s\S]*?)<\/a>/gi;
-            let dlMatch;
-            while ((dlMatch = dlRegex.exec(dlHtml)) !== null) {
-                const link = dlMatch[1];
-                let qualityText = dlMatch[2].replace(/<[^>]+>/g, '').trim(); 
-                
-                // e.g. "Download (360P - mp4)"
-                const qMatch = qualityText.match(/(\d+P)/i);
-                const quality = qMatch ? qMatch[1] : 'MP4';
-                
-                if (link.includes('.mp4')) {
-                    streams.push({
-                        url: link,
-                        quality: quality,
-                        sourceName: 'Gogo CDN (MP4)',
-                        isM3U8: false
-                    });
-                }
-            }
-        } catch (e) {
-            // Ignored, proceed to HLS fallback
-        }
-    }
-
-    // 2. Find streaming iframe (HLS)
+    // Find streaming iframe (Vidstreaming/tamilembed/gogocdn)
     const iframeMatch = html.match(/<iframe[^>]*src="([^"]+)"/i);
     if (iframeMatch) {
         let embedUrl = iframeMatch[1];
@@ -113,12 +78,54 @@ const GOGOANIME = {
             embedUrl = 'https:' + embedUrl;
         }
         
-        streams.push({
-            url: embedUrl,
-            quality: 'Auto',
-            sourceName: 'Gogo Embed (Stream)',
-            isM3U8: true 
-        });
+        try {
+            const embedHost = embedUrl.split('/').slice(0, 3).join('/'); 
+            let streamId = embedUrl.split('/').pop().split('?')[0];
+            
+            // Try getSources API directly (Decrypts the iframe)
+            let apiUrl = `${embedHost}/stream/getSources?id=${streamId}&id=${streamId}`;
+            let apiResponse = await nativeFetch(apiUrl, {
+                "Accept": "*/*",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": embedUrl
+            });
+            
+            let data = JSON.parse(apiResponse);
+            
+            if (!data || (!data.sources && !data.file && !data.url)) {
+                apiUrl = `${embedHost}/stream/getSourcesNew?id=${streamId}&id=${streamId}`;
+                apiResponse = await nativeFetch(apiUrl, {
+                    "Accept": "*/*",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": embedUrl
+                });
+                data = JSON.parse(apiResponse);
+            }
+
+            let actualData = data.result ? data.result : data;
+            if (actualData) {
+                let sources = actualData.sources || actualData.file || actualData.url;
+                if (Array.isArray(sources)) {
+                    sources.forEach(src => {
+                        const streamUrl = src.file || src.url || src.src || src.link;
+                        if (streamUrl && typeof streamUrl === 'string') {
+                            streams.push({ 
+                                quality: src.label || src.quality || "Auto", 
+                                url: streamUrl, 
+                                isM3U8: streamUrl.includes('.m3u8')
+                            });
+                        }
+                    });
+                } else if (typeof sources === 'object' && (sources.file || sources.url)) {
+                    streams.push({ quality: "Auto", url: sources.file || sources.url, isM3U8: (sources.file || sources.url).includes('.m3u8') });
+                } else if (typeof sources === 'string' && sources.startsWith("http")) {
+                    streams.push({ quality: "Auto", url: sources, isM3U8: sources.includes('.m3u8') });
+                }
+            }
+        } catch (e) {
+            // Fallback to iframe url if API fails
+            streams.push({ url: embedUrl, quality: 'Iframe Embed (Fallback)', isM3U8: false });
+        }
     }
 
     return streams;
