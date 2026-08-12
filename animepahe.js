@@ -1,76 +1,80 @@
-// AnimePahe Extension for Yugen (Pure Native)
-// Hardened against DPI TCP Resets
+// AnimePahe Extension for Yugen (Pure Native, Robust Null-Checking)
 const ANIMEPAHE = {
   name: 'AnimePahe',
   pkgName: 'ru.animepahe',
-  version: '1.0.3',
+  version: '1.0.4',
   lang: 'EN',
-  baseURL: 'https://animepahe.com', // Using .com to evade .su ISP blocks
+  baseURL: 'https://animepahe.com',
 
   async _fetchApi(url) {
-    try {
-      const jsonStr = await nativeFetch(url, {
-        'Referer': this.baseURL,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-      });
-      return JSON.parse(jsonStr);
-    } catch (e) {
-      console.error(`[AnimePahe] Dart fetch blocked. Deploying WebView fallback...`);
-      const res = await fetch(url, { headers: { 'Referer': this.baseURL } });
-      return await res.json();
-    }
+    const jsonStr = await nativeFetch(url, {
+      'Referer': this.baseURL,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    });
+    return JSON.parse(jsonStr);
   },
 
   async _fetchHtml(url) {
-    try {
-      return await nativeFetch(url, { 'Referer': this.baseURL });
-    } catch (e) {
-      const res = await fetch(url, { headers: { 'Referer': this.baseURL } });
-      return await res.text();
-    }
+    return await nativeFetch(url, { 
+      'Referer': this.baseURL,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    });
   },
 
   async search(query) {
-    const data = await this._fetchApi(`${this.baseURL}/api?m=search&q=${encodeURIComponent(query)}`);
-    if (!data || !data.data) return [];
-    
-    return data.data.map(item => ({
-      title: item.title,
-      poster: item.poster,
-      url: item.session
-    }));
+    try {
+      const data = await this._fetchApi(`${this.baseURL}/api?m=search&q=${encodeURIComponent(query)}`);
+      if (!data || !data.data || !Array.isArray(data.data)) return [];
+      
+      return data.data.map(item => ({
+        title: item.title,
+        poster: item.poster,
+        url: item.session
+      }));
+    } catch(e) {
+      console.error("[AnimePahe] Search failed:", e);
+      return [];
+    }
   },
 
   async getEpisodes(session) {
-    const data = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
-    if (!data || !data.data) return [];
-    
-    const episodes = [];
-    const maxPages = data.last_page || 1;
-    
-    for (let p = 1; p <= maxPages; p++) {
-        let pageData = data;
-        if (p > 1) {
-            try {
-                pageData = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=${p}`);
-            } catch(e) { break; }
-        }
-        if (pageData && pageData.data) {
-            pageData.data.forEach(ep => {
-                episodes.push({
-                    id: `${session}|${ep.session}`,
-                    number: ep.episode,
-                    title: `Episode ${ep.episode}`
-                });
-            });
-        }
+    try {
+      const data = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
+      if (!data || !data.data) return [];
+      
+      const episodes = [];
+      const maxPages = data.last_page || 1;
+      
+      for (let p = 1; p <= maxPages; p++) {
+          let pageData = data;
+          if (p > 1) {
+              try {
+                  pageData = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=${p}`);
+              } catch(e) { break; }
+          }
+          if (pageData && pageData.data) {
+              pageData.data.forEach(ep => {
+                  episodes.push({
+                      id: `${session}|${ep.session}`,
+                      number: ep.episode,
+                      title: `Episode ${ep.episode}`
+                  });
+              });
+          }
+      }
+      return episodes;
+    } catch(e) {
+      return [];
     }
-    return episodes;
   },
 
   async getEpisodeCount(session) {
-    const data = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
-    return data ? data.total : 0;
+    try {
+      const data = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
+      return data ? (data.total || 0) : 0;
+    } catch(e) {
+      return 0;
+    }
   },
 
   _unpack(code) {
@@ -93,17 +97,30 @@ const ANIMEPAHE = {
       return p;
   },
 
-  async extractStreams(episodeId) {
+  async extractStreams(episodeId, animeTitle) {
     try {
-        let safeSession = episodeId.split('|')[1];
+        let safeSession = episodeId.contains('|') ? episodeId.split('|')[1] : null;
         
+        // Dynamic search fallback if ID is not pre-bound
         if (!safeSession) {
-            const slug = episodeId.split('/ep-')[0];
-            const dataInfo = await this._fetchApi(`${this.baseURL}/api?m=search&q=${slug}`);
-            const trueId = dataInfo.data[0].session;
-            const epNum = parseInt(episodeId.split('/ep-')[1]);
+            let searchQuery = animeTitle || episodeId.split('/ep-')[0];
+            searchQuery = searchQuery.replace(/[-_]/g, ' ').replace(/iii/i, '3');
+            
+            const searchResults = await this.search(searchQuery);
+            if (!searchResults || searchResults.length === 0) {
+              console.error("[AnimePahe] No anime found matching search query:", searchQuery);
+              return [];
+            }
+            
+            const trueId = searchResults[0].url;
+            const epNum = parseInt(episodeId.split('/ep-')[1]) || 1;
             const eps = await this.getEpisodes(trueId);
             const target = eps.find(e => e.number === epNum);
+            
+            if (!target) {
+              console.error("[AnimePahe] Could not match episode number:", epNum);
+              return [];
+            }
             safeSession = target.id.split('|')[1];
         }
 
@@ -119,7 +136,6 @@ const ANIMEPAHE = {
                     
                     try {
                         const kwikHtml = await this._fetchHtml(kwikUrl);
-                        
                         const evalMatch = kwikHtml.match(/eval\(function\(p,a,c,k,e,d\).*?\)\)/);
                         if (evalMatch) {
                             const unpacked = this._unpack(evalMatch[0]);
