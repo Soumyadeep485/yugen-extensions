@@ -1,123 +1,87 @@
-// GogoAnime (anitaku) Extension for Yugen
+// GogoAnime (Anitaku) Extension for Yugen
 const GOGOANIME = {
   name: 'GogoAnime',
   pkgName: 'com.gogoanime',
-  version: '1.0.4',
+  version: '1.0.5',
   lang: 'EN',
-  baseURL: 'https://anitaku.com.ro',
-  
   apiHosts: [
-      'https://spacetik.vercel.app/anime/gogoanime',
+      'https://spacetik.vercel.app/anime/gogoanime', 
       'https://consumet-api-clone.vercel.app/anime/gogoanime'
   ],
 
-  async _fetchFallback(endpoint) {
-      for (let host of this.apiHosts) {
-          try {
-              const url = `${host}${endpoint}`;
-              const responseStr = await nativeFetch(url);
-              
-              if (!responseStr || responseStr.trim().startsWith('<')) continue;
-              
-              const data = JSON.parse(responseStr);
-              if (data && data.sources && data.sources.length > 0) {
-                  return { type: 'consumet', data: data.sources };
-              }
-          } catch (e) {
-              console.error(`[GogoAnime] Failed fetching from ${host}`);
-          }
-      }
-      throw new Error("All API instances returned empty or were unreachable.");
+  async _api(endpoint) {
+    for (let host of this.apiHosts) {
+      try {
+        const res = await nativeFetch(host + endpoint);
+        if (!res.trim().startsWith('<')) {
+          const json = JSON.parse(res);
+          if (json) return json;
+        }
+      } catch(e) {}
+    }
+    throw new Error("All API instances are down or blocked.");
   },
 
   async search(query) {
     try {
-      const html = await nativeFetch(`${this.baseURL}/search.html?keyword=${encodeURIComponent(query)}`);
-      const results = [];
-      const articleRegex = /<article class="bs"[\s\S]*?href="([^"]+)"[\s\S]*?title="([^"]+)"[\s\S]*?src="([^"]+)"/gi;
-      let match;
-      while ((match = articleRegex.exec(html)) !== null) {
-        let url = match[1];
-        let slug = url.split('/').filter(Boolean).pop();
-        if (slug.includes('-episode-')) slug = slug.split('-episode-')[0];
-        results.push({ title: match[2].replace(/ Episode \d+/i, '').trim(), poster: match[3], url: slug });
-      }
-      return results;
-    } catch(e) {
-      return [];
-    }
-  },
-
-  async getEpisodeCount(slug) {
-    try {
-      const html = await nativeFetch(`${this.baseURL}/category/${slug}`);
-      const epRegex = /ep_end="(\d+)"/gi;
-      let maxEp = 0;
-      let match;
-      while ((match = epRegex.exec(html)) !== null) {
-          const ep = parseInt(match[1]);
-          if (ep > maxEp) maxEp = ep;
-      }
-      return maxEp || 1; 
-    } catch(e) {
-      return 1;
-    }
+      const res = await this._api(`/${encodeURIComponent(query)}`);
+      return res.results.map(i => ({ title: i.title, poster: i.image, url: i.id }));
+    } catch(e) { return []; }
   },
 
   async getEpisodes(slug) {
-    const maxEp = await this.getEpisodeCount(slug);
-    const episodes = [];
-    for (let i = 1; i <= maxEp; i++) {
-        episodes.push({ id: `${slug}/ep-${i}`, number: i, title: `Episode ${i}` });
-    }
-    return episodes;
+    try {
+      const res = await this._api(`/info/${slug}`);
+      return res.episodes.map(e => ({ 
+          id: `${slug}/ep-${e.number}`, 
+          number: e.number, 
+          title: `Episode ${e.number}` 
+      }));
+    } catch(e) { return []; }
   },
 
-  async extractStreams(episodeId, animeTitle) {
+  async getEpisodeCount(slug) {
+    const eps = await this.getEpisodes(slug);
+    return eps.length || 1;
+  },
+
+  async extractStreams(epId, title) {
+    let safeId = epId.replace('/ep-', '-episode-');
+    
     try {
-        let safeId = episodeId;
-        if (episodeId.includes('/ep-')) safeId = episodeId.replace('/ep-', '-episode-');
-        
-        // Clean slug formatting
-        safeId = safeId.replace(/iii/i, '3');
-
-        let result;
+      const res = await this._api(`/watch/${safeId}`);
+      if (!res.sources || res.sources.length === 0) throw new Error("No sources");
+      return res.sources.map(s => ({ 
+          quality: `[SUB] Gogo CDN - ${s.quality || 'Auto'}`, 
+          url: s.url, 
+          isM3U8: s.isM3U8, 
+          headers: {"Referer": "https://gogoplay.io/"}, 
+          subtitles: [] 
+      }));
+    } catch(e) {
+      // 🚀 SMART FALLBACK: If slug fails, search using only the first 2 words of the title!
+      const rawString = title || epId.split('/ep-')[0];
+      const shortQuery = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
+      
+      const searchResults = await this.search(shortQuery);
+      if (searchResults.length > 0) {
+        const trueSlug = searchResults[0].url;
+        const epNum = epId.split('/ep-')[1] || '1';
         try {
-          result = await this._fetchFallback(`/watch/${safeId}`);
-        } catch(e) {
-          // If direct slug watch fails, search first to grab the exact GogoAnime slug
-          const query = (animeTitle || safeId.split('-episode-')[0]).replace(/[-_]/g, ' ');
-          const searchRes = await this.search(query);
-          if (searchRes && searchRes.length > 0) {
-            const trueSlug = searchRes[0].url;
-            const epNum = episodeId.split('/ep-')[1] || '1';
-            result = await this._fetchFallback(`/watch/${trueSlug}-episode-${epNum}`);
-          } else {
-            throw e;
-          }
-        }
-
-        const streams = [];
-        const requiredHeaders = { "Referer": "https://gogoplay.io/" };
-        
-        if (result && result.type === 'consumet') {
-            result.data.forEach(src => {
-                streams.push({ 
-                    quality: `[SUB] Gogo CDN - ${src.quality || 'Auto'}`, 
-                    url: src.url, 
-                    isM3U8: src.isM3U8, 
-                    headers: requiredHeaders, 
-                    subtitles: [] 
-                });
-            });
-        }
-        return streams;
-    } catch(e) { 
-        console.error("[GogoAnime] Extraction Error:", e);
-        return []; 
+            const fallbackRes = await this._api(`/watch/${trueSlug}-episode-${epNum}`);
+            return fallbackRes.sources.map(s => ({ 
+                quality: `[SUB] Gogo CDN - ${s.quality || 'Auto'}`, 
+                url: s.url, 
+                isM3U8: s.isM3U8, 
+                headers: {"Referer": "https://gogoplay.io/"}, 
+                subtitles: [] 
+            }));
+        } catch(fallbackErr) { return []; }
+      }
+      return [];
     }
   }
 };
 
-window.extensions = window.extensions || {};
+window.extensions = window.extensions || {}; 
 window.extensions[GOGOANIME.pkgName] = GOGOANIME;
