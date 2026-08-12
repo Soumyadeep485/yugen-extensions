@@ -1,106 +1,92 @@
 // AnimePahe Extension for Yugen
+// Utilizing Consumet API for Kwik Obfuscation Bypass
 const ANIMEPAHE = {
   name: 'AnimePahe',
   pkgName: 'ru.animepahe',
-  version: '1.0.0',
+  version: '1.0.1',
   lang: 'EN',
-  baseURL: 'https://animepahe.ru',
+  
+  // Multi-host fallback in case primary instances face downtime
+  apiHosts: [
+      'https://api.consumet.org/anime/animepahe',
+      'https://api.haikei.xyz/anime/animepahe',
+      'https://consumet-api-clone.vercel.app/anime/animepahe'
+  ],
 
-  async _fetchApi(url) {
-    const jsonStr = await nativeFetch(url, {
-      'Referer': this.baseURL,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    });
-    return JSON.parse(jsonStr);
+  async _fetchFallback(endpoint) {
+      for (let host of this.apiHosts) {
+          try {
+              const url = `${host}${endpoint}`;
+              const response = await nativeFetch(url);
+              const data = JSON.parse(response);
+              if (data) return data;
+          } catch (e) {
+              console.error(`[AnimePahe] Failed fetching from ${host}`);
+          }
+      }
+      throw new Error("All API instances failed.");
   },
 
   async search(query) {
-    const data = await this._fetchApi(`${this.baseURL}/api?m=search&q=${encodeURIComponent(query)}`);
-    if (!data || !data.data) return [];
-    
-    return data.data.map(item => ({
-      title: item.title,
-      poster: item.poster,
-      url: item.session,
-      year: item.year
-    }));
+    try {
+        const data = await this._fetchFallback(`/${encodeURIComponent(query)}`);
+        return data.results.map(item => ({
+          title: item.title,
+          poster: item.image,
+          url: item.id
+        }));
+    } catch(e) { return []; }
   },
 
-  async getEpisodeCount(session) {
-    const data = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
-    return data ? data.total : 0;
+  async getEpisodes(slug) {
+    try {
+        const data = await this._fetchFallback(`/info/${slug}`);
+        if (!data.episodes) return [];
+        return data.episodes.map(ep => ({
+          id: ep.id, 
+          number: ep.number,
+          title: `Episode ${ep.number}`
+        }));
+    } catch(e) { return []; }
   },
 
-  async getEpisodes(session) {
-    const total = await this.getEpisodeCount(session);
-    const episodes = [];
-    
-    const maxPages = Math.min(Math.ceil(total / 30), 10); 
-    
-    for (let p = 1; p <= maxPages; p++) {
-        try {
-            const data = await this._fetchApi(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=${p}`);
-            if (data && data.data) {
-                data.data.forEach(ep => {
-                    episodes.push({
-                        id: `${session}|${ep.session}`,
-                        number: ep.episode,
-                        title: `Episode ${ep.episode}`
-                    });
+  async getEpisodeCount(slug) {
+    const eps = await this.getEpisodes(slug);
+    return eps.length;
+  },
+
+  async extractStreams(episodeId) {
+    try {
+        let safeId = episodeId;
+        
+        // If sticky-mapped from Anikoto's "slug/ep-1" format, dynamically resolve the true Pahe ID
+        if (episodeId.includes('/ep-')) {
+            const slug = episodeId.split('/ep-')[0];
+            const dataInfo = await this._fetchFallback(`/info/${slug}`);
+            const epNum = parseInt(episodeId.split('/ep-')[1]);
+            const epData = dataInfo.episodes.find(e => e.number === epNum);
+            if (epData) safeId = epData.id;
+        }
+
+        const data = await this._fetchFallback(`/watch/${safeId}`);
+        const streams = [];
+        
+        if (data.sources) {
+            data.sources.forEach(src => {
+                streams.push({
+                    quality: `[SUB] Kwik - ${src.quality || 'Auto'}`,
+                    url: src.url,
+                    isM3U8: src.isM3U8,
+                    headers: data.headers || { "Referer": "https://kwik.cx/" },
+                    subtitles: [] 
                 });
-            }
-        } catch (e) {
-            break;
+            });
         }
+        return streams;
+    } catch(e) { 
+        console.error("[AnimePahe] Extraction Error:", e);
+        return []; 
     }
-    
-    return episodes;
-  },
-
-  async extractStreams(episodeId, animeTitle) {
-    const parts = episodeId.split('|');
-    const epSession = parts[1];
-    
-    const data = await this._fetchApi(`${this.baseURL}/api?m=embed&id=${epSession}`);
-    const streams = [];
-    
-    if (data && data.data) {
-        for (const provider of Object.keys(data.data)) {
-            const links = data.data[provider];
-            for (const linkObj of Object.values(links)) {
-                const kwikUrl = linkObj.kwik; 
-                const quality = linkObj.resolution + 'p ' + (linkObj.audio === 'jpn' ? 'SUB' : 'DUB');
-                
-                try {
-                    const kwikHtml = await nativeFetch(kwikUrl, {
-                        'Referer': this.baseURL
-                    });
-                    
-                    const sourceMatch = kwikHtml.match(/source src="([^"]+)"/i);
-                    if (sourceMatch) {
-                        streams.push({
-                            url: sourceMatch[1],
-                            quality: quality,
-                            sourceName: `Kwik (${linkObj.resolution}p)`,
-                            isM3U8: sourceMatch[1].includes('.m3u8')
-                        });
-                    } else {
-                        // Pass kwik URL if extraction fails natively
-                        streams.push({
-                            url: kwikUrl,
-                            quality: quality,
-                            sourceName: `Kwik (${linkObj.resolution}p)`,
-                            isM3U8: false
-                        });
-                    }
-                } catch (e) {
-                    console.error("Failed to parse kwik", e);
-                }
-            }
-        }
-    }
-    
-    return streams;
   }
 };
 
