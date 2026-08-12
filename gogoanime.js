@@ -1,20 +1,23 @@
 // GogoAnime (Anitaku) Extension for Yugen
-// Pure Native MP4 Scraper (Catches 404 Exceptions to trigger Smart Fallback)
+// 100% Pure Native HTML Scraper (Ultra-Forgiving Regex)
 const GOGOANIME = {
   name: 'GogoAnime',
   pkgName: 'com.gogoanime',
-  version: '1.1.0',
+  version: '1.1.1',
   lang: 'EN',
-  baseURL: 'https://anitaku.com.ro',
+  baseURL: 'https://anitaku.pe', // 🚀 Updated to the official unblocked domain
 
   async search(query) {
     try {
       const html = await nativeFetch(`${this.baseURL}/search.html?keyword=${encodeURIComponent(query)}`);
       const results = [];
-      const regex = /<div class="img">\s*<a href="\/category\/([^"]+)" title="([^"]+)">\s*<img src="([^"]+)"/gi;
+      // 🚀 Ultra-forgiving regex that ignores formatting changes
+      const regex = /href="\/category\/([^"]+)" title="([^"]+)"/gi;
       let match;
       while ((match = regex.exec(html)) !== null) {
-        results.push({ url: match[1], title: match[2], poster: match[3] });
+        if (!results.find(r => r.url === match[1])) {
+            results.push({ url: match[1], title: match[2], poster: "" });
+        }
       }
       return results;
     } catch(e) { return []; }
@@ -45,31 +48,28 @@ const GOGOANIME = {
     let epHtml = "";
 
     try {
-        // Attempt to fetch direct AniList slug. If it 404s, Dart throws an exception!
         epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
     } catch(e) {
-        console.log("[GogoAnime] 404 Exception caught. Bad slug.");
         epHtml = ""; 
     }
 
-    let dlMatch = epHtml ? epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i) : null;
+    // Relaxed Regex to find the download page link
+    let dlMatch = epHtml ? (epHtml.match(/href="([^"]+download\?id=[^"]+)"/i) || epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i)) : null;
     
-    // 🚀 SMART FALLBACK: Activated if the page 404'd or the download button is missing
+    // SMART FALLBACK
     if (!dlMatch) {
         console.log("[GogoAnime] Deploying Smart Search fallback...");
         const rawString = title || slug;
-        // Strip down to the first two words (e.g., "Mushoku Tensei")
         const query = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
         
         const searchRes = await this.search(query);
         if (searchRes.length > 0) {
-            // Find the best match, preferring "season", "part", or just the first result
             const bestMatch = searchRes.find(r => r.url.includes('season') || r.url.includes(epNum)) || searchRes[0];
             slug = bestMatch.url; 
             
             try {
                 epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
-                dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
+                dlMatch = epHtml.match(/href="([^"]+download\?id=[^"]+)"/i) || epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
             } catch(e) { return []; }
         }
     }
@@ -82,13 +82,12 @@ const GOGOANIME = {
         const dlHtml = await nativeFetch(dlUrl);
         
         // Extract pure MP4s from the download page
-        const linkRegex = /<a href="([^"]+)"[^>]*>\s*Download[\s\S]*?\(([^)]+)\)/gi;
+        const linkRegex = /<a href="([^"]+)"[^>]*>[\s\S]*?Download\s*\(([^)]+)\)/gi;
         let match;
         while ((match = linkRegex.exec(dlHtml)) !== null) {
             const link = match[1].replace(/&amp;/g, '&');
             const qual = match[2].trim();
             
-            // Exclude captcha gates, include pure MP4s
             if (!link.includes('captcha') && link.startsWith('http')) {
                 streams.push({
                     quality: `[SUB] MP4 Direct - ${qual}`,
@@ -100,10 +99,7 @@ const GOGOANIME = {
             }
         }
         return streams;
-    } catch(e) {
-        console.error("[GogoAnime] Native Scraper Error:", e);
-        return [];
-    }
+    } catch(e) { return []; }
   }
 };
 
