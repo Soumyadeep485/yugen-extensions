@@ -6,32 +6,22 @@ const GOGOANIME = {
   lang: 'EN',
   baseURL: 'https://anitaku.com.ro',
 
-  async search(query) {
-    const html = await nativeFetch(`${this.baseURL}/?s=${encodeURIComponent(query)}`);
+    async search(query) {
+    const html = await nativeFetch(`${this.baseURL}/search.html?keyword=${encodeURIComponent(query)}`);
     const results = [];
     
-    // Very basic regex parsing for <article class="bs">
-    const articleRegex = /<article class="bs"[\s\S]*?href="([^"]+)"[\s\S]*?title="([^"]+)"[\s\S]*?src="([^"]+)"/gi;
+    const itemRegex = /<li>\s*<div class="img">\s*<a href="\/category\/([^"]+)" title="([^"]+)">\s*<img src="([^"]+)"/gi;
     let match;
-    while ((match = articleRegex.exec(html)) !== null) {
-      let url = match[1];
-      const title = match[2];
-      const poster = match[3];
-
-      // Extract slug from URL (e.g. /category/bleach or /bleach-episode-1/)
-      let slug = url.split('/').filter(Boolean).pop();
-      if (slug.includes('-episode-')) {
-          slug = slug.split('-episode-')[0];
-      }
-
+    while ((match = itemRegex.exec(html)) !== null) {
       results.push({
-        title: title.replace(/ Episode \d+/i, '').trim(),
-        poster: poster,
-        url: slug
+        title: match[2].trim(),
+        poster: match[3],
+        url: match[1] // This is the exact slug we need!
       });
     }
     return results;
   },
+
 
   async getEpisodeCount(slug) {
     const html = await nativeFetch(`${this.baseURL}/category/${slug}`);
