@@ -1,10 +1,10 @@
-// AnimePahe Extension for Yugen (Pure Native Kwik Unpacker)
+// AnimePahe Extension for Yugen (100% Pure Native Kwik Unpacker)
 const ANIMEPAHE = {
   name: 'AnimePahe',
   pkgName: 'ru.animepahe',
-  version: '1.0.9',
+  version: '1.1.0',
   lang: 'EN',
-  baseURL: 'https://animepahe.ru', // Swapped to .ru mirror to evade CF blocks
+  baseURL: 'https://animepahe.pw', // 🚀 Updated to the working .pw mirror
 
   async _fetchApi(url) {
     const jsonStr = await nativeFetch(url, {
@@ -111,10 +111,10 @@ const ANIMEPAHE = {
                             const sourceMatch = unpacked.match(/const source='([^']+)'/);
                             if (sourceMatch) {
                                 streams.push({
-                                    url: sourceMatch[1],
                                     quality: `[Kwik] ${quality}`,
-                                    headers: { "Referer": "https://kwik.cx/" },
+                                    url: sourceMatch[1],
                                     isM3U8: sourceMatch[1].includes('.m3u8'),
+                                    headers: { "Referer": "https://kwik.cx/" },
                                     subtitles: []
                                 });
                             }
