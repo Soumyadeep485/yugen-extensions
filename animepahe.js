@@ -1,17 +1,33 @@
-// AnimePahe Extension for Yugen (Pure Native, No API)
+// AnimePahe Extension for Yugen (Pure Native)
+// Hardened against DPI TCP Resets
 const ANIMEPAHE = {
   name: 'AnimePahe',
   pkgName: 'ru.animepahe',
-  version: '1.0.2',
+  version: '1.0.3',
   lang: 'EN',
-  baseURL: 'https://animepahe.ru',
+  baseURL: 'https://animepahe.com', // Using .com to evade .su ISP blocks
 
   async _fetchApi(url) {
-    const jsonStr = await nativeFetch(url, {
-      'Referer': this.baseURL,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    });
-    return JSON.parse(jsonStr);
+    try {
+      const jsonStr = await nativeFetch(url, {
+        'Referer': this.baseURL,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+      });
+      return JSON.parse(jsonStr);
+    } catch (e) {
+      console.error(`[AnimePahe] Dart fetch blocked. Deploying WebView fallback...`);
+      const res = await fetch(url, { headers: { 'Referer': this.baseURL } });
+      return await res.json();
+    }
+  },
+
+  async _fetchHtml(url) {
+    try {
+      return await nativeFetch(url, { 'Referer': this.baseURL });
+    } catch (e) {
+      const res = await fetch(url, { headers: { 'Referer': this.baseURL } });
+      return await res.text();
+    }
   },
 
   async search(query) {
@@ -57,7 +73,6 @@ const ANIMEPAHE = {
     return data ? data.total : 0;
   },
 
-  // 🚀 Native JavaScript Unpacker for Kwik's eval() payload
   _unpack(code) {
       const argsMatch = code.match(/}\('(.*?)', *(\d+), *(\d+), *'(.*?)'\.split\('\|'\)/);
       if (!argsMatch) return code;
@@ -82,7 +97,6 @@ const ANIMEPAHE = {
     try {
         let safeSession = episodeId.split('|')[1];
         
-        // Sticky-mapping fallback resolver
         if (!safeSession) {
             const slug = episodeId.split('/ep-')[0];
             const dataInfo = await this._fetchApi(`${this.baseURL}/api?m=search&q=${slug}`);
@@ -104,11 +118,8 @@ const ANIMEPAHE = {
                     const quality = linkObj.resolution + 'p ' + (linkObj.audio === 'jpn' ? 'SUB' : 'DUB');
                     
                     try {
-                        const kwikHtml = await nativeFetch(kwikUrl, {
-                            'Referer': this.baseURL
-                        });
+                        const kwikHtml = await this._fetchHtml(kwikUrl);
                         
-                        // 🚀 Execute Native Unpacking to bypass API limits entirely!
                         const evalMatch = kwikHtml.match(/eval\(function\(p,a,c,k,e,d\).*?\)\)/);
                         if (evalMatch) {
                             const unpacked = this._unpack(evalMatch[0]);
