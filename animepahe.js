@@ -1,67 +1,61 @@
 // AnimePahe Extension for Yugen
+// Features: CodeTabs Proxy Wrapping + Pure Native Kwik Unpacker
 const ANIMEPAHE = {
   name: 'AnimePahe',
   pkgName: 'ru.animepahe',
-  version: '1.0.6',
+  version: '1.0.7',
   lang: 'EN',
   baseURL: 'https://animepahe.com',
 
-  async _fetchJson(url) {
-      try {
-          const r1 = await nativeFetch(url, { 'Referer': this.baseURL });
-          return JSON.parse(r1);
+  async _fetch(url, isJson = true) {
+      // Force all traffic through CodeTabs to bypass Cloudflare and DPI Resets
+      const proxyUrl = 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url);
+      try { 
+          const res = await nativeFetch(proxyUrl); 
+          if (res.includes('Just a moment...')) throw new Error("CF Blocked Proxy");
+          return isJson ? JSON.parse(res) : res;
       } catch(e) {}
 
+      // Secondary AllOrigins fallback
+      const altProxy = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
       try {
-          const r2 = await fetch('https://corsproxy.io/?url=' + encodeURIComponent(url));
-          return await r2.json();
-      } catch(e) {}
-
-      const r3 = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url));
-      return await r3.json();
-  },
-
-  async _fetchHtml(url) {
-      try {
-          const r1 = await nativeFetch(url, { 'Referer': this.baseURL });
-          if (!r1.includes('Just a moment...')) return r1; // Reject Cloudflare HTML
-      } catch(e) {}
-
-      try {
-          const r2 = await fetch('https://corsproxy.io/?url=' + encodeURIComponent(url));
-          return await r2.text();
-      } catch(e) {}
-
-      const r3 = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url));
-      return await r3.text();
+          const res2 = await nativeFetch(altProxy);
+          return isJson ? JSON.parse(res2) : res2;
+      } catch(e) { throw new Error("All Proxies Blocked"); }
   },
 
   async search(query) {
-    const data = await this._fetchJson(`${this.baseURL}/api?m=search&q=${encodeURIComponent(query)}`);
-    if (!data || !data.data) return [];
-    return data.data.map(i => ({ title: i.title, poster: i.poster, url: i.session }));
+    try {
+      const data = await this._fetch(`${this.baseURL}/api?m=search&q=${encodeURIComponent(query)}`);
+      if (!data || !data.data) return [];
+      return data.data.map(i => ({ title: i.title, poster: i.poster, url: i.session }));
+    } catch(e) { return []; }
   },
 
   async getEpisodes(session) {
-    const data = await this._fetchJson(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
-    if (!data || !data.data) return [];
-    
-    const episodes = [];
-    const maxPages = data.last_page || 1;
-    for (let p = 1; p <= maxPages; p++) {
-        let pageData = p === 1 ? data : await this._fetchJson(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=${p}`);
-        if (pageData && pageData.data) {
-            pageData.data.forEach(ep => {
-                episodes.push({ id: `${session}|${ep.session}`, number: ep.episode, title: `Episode ${ep.episode}` });
-            });
-        }
-    }
-    return episodes;
+    try {
+      const data = await this._fetch(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
+      if (!data || !data.data) return [];
+      
+      const episodes = [];
+      const maxPages = data.last_page || 1;
+      for (let p = 1; p <= maxPages; p++) {
+          let pageData = p === 1 ? data : await this._fetch(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=${p}`);
+          if (pageData && pageData.data) {
+              pageData.data.forEach(ep => {
+                  episodes.push({ id: `${session}|${ep.session}`, number: ep.episode, title: `Episode ${ep.episode}` });
+              });
+          }
+      }
+      return episodes;
+    } catch(e) { return []; }
   },
 
   async getEpisodeCount(session) {
-    const data = await this._fetchJson(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
-    return data ? (data.total || 0) : 0;
+    try {
+      const data = await this._fetch(`${this.baseURL}/api?m=release&id=${session}&sort=episode_asc&page=1`);
+      return data ? (data.total || 0) : 0;
+    } catch(e) { return 0; }
   },
 
   _unpack(code) {
@@ -90,7 +84,7 @@ const ANIMEPAHE = {
             safeSession = target.id.split('|')[1];
         }
 
-        const data = await this._fetchJson(`${this.baseURL}/api?m=embed&id=${safeSession}`);
+        const data = await this._fetch(`${this.baseURL}/api?m=embed&id=${safeSession}`);
         const streams = [];
         
         if (data && data.data) {
@@ -99,7 +93,7 @@ const ANIMEPAHE = {
                     const kwikUrl = linkObj.kwik; 
                     const quality = linkObj.resolution + 'p ' + (linkObj.audio === 'jpn' ? 'SUB' : 'DUB');
                     try {
-                        const kwikHtml = await this._fetchHtml(kwikUrl);
+                        const kwikHtml = await this._fetch(kwikUrl, false);
                         const evalMatch = kwikHtml.match(/eval\(function\(p,a,c,k,e,d\).*?\)\)/);
                         if (evalMatch) {
                             const unpacked = this._unpack(evalMatch[0]);
