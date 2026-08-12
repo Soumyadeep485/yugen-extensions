@@ -3,7 +3,7 @@
 const GOGOANIME = {
   name: 'GogoAnime',
   pkgName: 'com.gogoanime',
-  version: '1.0.8',
+  version: '1.0.9',
   lang: 'EN',
   baseURL: 'https://anitaku.com.ro',
 
@@ -44,47 +44,46 @@ const GOGOANIME = {
     let epNum = epId.split('/ep-')[1] || '1';
 
     try {
-        // 1. Fetch Episode Page & Handle 404 Slug Mismatches natively
         let epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
+        let dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
         
-        if (epHtml.includes('error-404') || epHtml.includes('404 Not Found') || epHtml.includes('Page not found')) {
-            console.log("[GogoAnime] Slug mismatch. Deploying Smart Search fallback...");
-            const query = (title || slug).replace(/[-_:]/g, ' ').split(' ').slice(0, 2).join(' ');
-            const searchRes = await this.search(query);
+        // 🚀 BULLETPROOF FALLBACK: If the download button is missing, the slug is wrong. 
+        if (!dlMatch) {
+            console.log("[GogoAnime] Missing download link (404). Deploying Smart Search fallback...");
+            const rawString = title || slug;
+            const query = rawString.replace(/[-_:]/g, ' ').split(' ').filter(Boolean).slice(0, 2).join(' ');
             
+            const searchRes = await this.search(query);
             if (searchRes.length > 0) {
-                slug = searchRes[0].url;
+                slug = searchRes[0].url; // Grab the true GogoAnime slug
                 epHtml = await nativeFetch(`${this.baseURL}/${slug}-episode-${epNum}`);
-            } else {
-                return [];
+                dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
             }
         }
 
+        if (!dlMatch) return []; // Fallback failed
+
         const streams = [];
         
-        // 2. Extract the hidden Download Page URL
-        const dlMatch = epHtml.match(/<li class="dow?n?loads"><a href="([^"]+)"/i);
-        if (dlMatch) {
-            const dlUrl = dlMatch[1].startsWith('//') ? 'https:' + dlMatch[1] : dlMatch[1];
-            const dlHtml = await nativeFetch(dlUrl);
+        // Scrape the pure, unencrypted .mp4 links directly from the download page!
+        const dlUrl = dlMatch[1].startsWith('//') ? 'https:' + dlMatch[1] : dlMatch[1];
+        const dlHtml = await nativeFetch(dlUrl);
+        
+        const linkRegex = /<a href="([^"]+)"[^>]*>\s*Download[\s\S]*?\(([^)]+)\)/gi;
+        let match;
+        while ((match = linkRegex.exec(dlHtml)) !== null) {
+            const link = match[1].replace(/&amp;/g, '&');
+            const qual = match[2].trim();
             
-            // 3. Scrape the pure, unencrypted .mp4 links!
-            const linkRegex = /<a href="([^"]+)"[^>]*>\s*Download[\s\S]*?\(([^)]+)\)/gi;
-            let match;
-            while ((match = linkRegex.exec(dlHtml)) !== null) {
-                const link = match[1].replace(/&amp;/g, '&');
-                const qual = match[2].trim();
-                
-                // Skip captcha locks and invalid links
-                if (!link.includes('captcha') && link.startsWith('http')) {
-                    streams.push({
-                        quality: `[SUB] MP4 - ${qual}`,
-                        url: link,
-                        isM3U8: link.includes('.m3u8'),
-                        headers: {"Referer": this.baseURL + "/"},
-                        subtitles: []
-                    });
-                }
+            // Skip captcha-locked links
+            if (!link.includes('captcha') && link.startsWith('http')) {
+                streams.push({
+                    quality: `[SUB] MP4 Direct - ${qual}`,
+                    url: link,
+                    isM3U8: link.includes('.m3u8'),
+                    headers: {"Referer": this.baseURL + "/"},
+                    subtitles: []
+                });
             }
         }
         return streams;
