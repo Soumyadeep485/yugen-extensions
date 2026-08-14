@@ -213,46 +213,67 @@ globalThis.Extension = (function() {
                         
                         const embedHost = embedUrl.split('/').slice(0, 3).join('/'); 
                         
-                        // 🚀 THE FIX: Extract true ID directly from the embed URL
-                        let streamId = embedUrl.split('/').pop().split('?')[0];
-                        
-                        // Fallback ONLY if the URL didn't contain an ID
-                        if (!streamId || streamId.length < 5) {
-                            const embedHtml = await nativeFetch(embedUrl, { "Referer": BASE_URL + "/" });
-                            const streamIdMatch = embedHtml.match(/data-id="([^"]+)"/);
-                            if (streamIdMatch) {
-                                streamId = streamIdMatch[1];
-                            }
-                        }
-                        
-                        // If we STILL don't have a valid ID, skip this server to avoid crashing
-                        if (!streamId) continue;
-                        
-                        let apiUrl = `${embedHost}/stream/getSources?id=${streamId}&id=${streamId}`;
-                        let apiResponse = await nativeFetch(apiUrl, {
-                            "Accept": "*/*",
-                            "X-Requested-With": "XMLHttpRequest",
-                            "Referer": embedUrl
-                        });
-                        
-                        let data = {};
-                        try { data = JSON.parse(apiResponse); } catch(e) {}
-                        
-                        if (!data || (!data.sources && !data.file && !data.url)) {
-                            apiUrl = `${embedHost}/stream/getSourcesNew?id=${streamId}&id=${streamId}`;
-                            apiResponse = await nativeFetch(apiUrl, {
-                                "Accept": "*/*",
-                                "X-Requested-With": "XMLHttpRequest",
-                                "Referer": embedUrl
-                            });
-                            try { data = JSON.parse(apiResponse); } catch(e) {}
-                        }
-
                         const requiredHeaders = {
                             "Referer": embedHost + "/",
                             "Origin": embedHost,
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                         };
+
+                        // 🚀 KOTLIN PARITY FIX 1: MewCDN Fragment Decoding
+                        if (embedUrl.includes("mewcdn.online/player/plyr.php")) {
+                            const fragment = embedUrl.split('#')[1];
+                            if (fragment) {
+                                const rawM3u8 = decodeURIComponent(escape(atob(fragment))).trim();
+                                const mewHtml = await nativeFetch(embedUrl, { "Referer": BASE_URL + "/" });
+                                const hostMapMatch = mewHtml.match(/var HOST_MAP\s*=\s*\{([^}]+)\}/);
+                                let finalM3u8 = rawM3u8;
+                                
+                                if (hostMapMatch) {
+                                    const mapString = hostMapMatch[1];
+                                    const entryRegex = /'([^']+)'\s*:\s*'([^']+)'/g;
+                                    let match;
+                                    while ((match = entryRegex.exec(mapString)) !== null) {
+                                        if (finalM3u8.includes(match[1])) {
+                                            finalM3u8 = finalM3u8.replace(match[1], match[2]);
+                                            break;
+                                        }
+                                    }
+                                }
+                                allStreams.push({ quality: `${prefix} ${serverName} - Auto`, url: finalM3u8, headers: requiredHeaders, subtitles: [] });
+                            }
+                            continue;
+                        }
+                        
+                        // 🚀 KOTLIN PARITY FIX 2: Strict Data-ID Body Regex
+                        const embedHtml = await nativeFetch(embedUrl, { "Referer": BASE_URL + "/" });
+                        const dataIdMatch = embedHtml.match(/data-id="([^"]+)"/);
+                        let data = {};
+
+                        if (dataIdMatch) {
+                            const dataId = dataIdMatch[1];
+                            const streamType = isDub ? "dub" : "sub";
+                            
+                            // Strategy A: getSources
+                            let apiUrl = `${embedHost}/stream/getSources?id=${dataId}&id=${dataId}`;
+                            let apiResponse = await nativeFetch(apiUrl, { "Accept": "*/*", "X-Requested-With": "XMLHttpRequest", "Referer": embedUrl, "Origin": embedHost });
+                            try { data = JSON.parse(apiResponse); } catch(e) {}
+                            
+                            // Strategy B: getSourcesNew Fallback
+                            if (!data || (!data.sources && !data.file && !data.url && !data.result)) {
+                                apiUrl = `${embedHost}/stream/getSourcesNew?id=${dataId}&id=${dataId}&type=${streamType}&type=${streamType}`;
+                                apiResponse = await nativeFetch(apiUrl, { "Accept": "*/*", "X-Requested-With": "XMLHttpRequest", "Referer": embedUrl, "Origin": embedHost });
+                                try { data = JSON.parse(apiResponse); } catch(e) {}
+                            }
+                        }
+
+                        // 🚀 KOTLIN PARITY FIX 3: Direct m3u8 Regex Brute-Force
+                        if (!data || (!data.sources && !data.file && !data.url && !data.result)) {
+                            const directM3u8Match = embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
+                            if (directM3u8Match) {
+                                allStreams.push({ quality: `${prefix} ${serverName} - Auto`, url: directM3u8Match[0], headers: requiredHeaders, subtitles: [] });
+                                continue;
+                            }
+                        }
 
                         let parsedSubtitles = [];
                         let tracks = data.tracks || (data.result && data.result.tracks) || [];
