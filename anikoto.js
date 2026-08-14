@@ -62,7 +62,6 @@ globalThis.Extension = (function() {
         return searchResults[0].url;
     }
 
-    // 🚀 THE FIX: Helper to extract a clean search title if a URL 404s
     function extractTitleFromUrl(url) {
         let str = url.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
         let parts = str.split('/');
@@ -104,8 +103,6 @@ globalThis.Extension = (function() {
                 let targetUrl = animeUrl;
                 let responseHtml = await nativeFetch(targetUrl);
                 
-                // 🚀 THE FIX: Self-Healing 404 Handler
-                // If Anikoto blocks us because we missed the "-0u851" hash, we silently search and fix it.
                 if (responseHtml.includes("Error 404") || responseHtml.includes("Page not found")) {
                     const query = extractTitleFromUrl(targetUrl);
                     const searchRes = await Extension.search(query);
@@ -146,9 +143,11 @@ globalThis.Extension = (function() {
                 epElements.forEach(el => {
                     let epNum = parseFloat(el.getAttribute('data-num') || "1");
                     let ids = el.getAttribute('data-ids'); 
+                    
+                    // 🚀 THE FIX: Package the URL, EpNum, and IDs together so extractStreams doesn't have to guess!
                     episodes.push({ 
                         number: epNum, 
-                        id: ids, 
+                        id: `${targetUrl}|||${epNum}|||${ids}`, 
                         title: el.parentElement?.getAttribute('title') || `Episode ${epNum}`
                     });
                 });
@@ -168,57 +167,72 @@ globalThis.Extension = (function() {
 
         extractStreams: async function(episodeId, animeTitle) {
             try {
-                let watchUrl = episodeId;
-                const epMatch = watchUrl.match(/[-/]ep-(\d+)/i);
-                const epNum = epMatch ? epMatch[1] : "1";
+                let targetUrl = "";
+                let epNum = "1";
+                let epIds = "";
 
-                if (watchUrl.startsWith("http")) {
-                    let cleanBase = watchUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
-                    watchUrl = `${cleanBase}/ep-${epNum}`;
+                // 🚀 THE FIX: Safely unpack the exact data passed from getEpisodes
+                if (episodeId.includes("|||")) {
+                    const parts = episodeId.split("|||");
+                    targetUrl = parts[0];
+                    epNum = parts[1];
+                    epIds = parts[2];
                 } else {
-                    let cleanSlug = watchUrl.replace(/(\/ep-\d+|-ep-\d+)+$/i, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-                    watchUrl = `${BASE_URL}/watch/${cleanSlug}/ep-${epNum}`;
-                }
-                
-                let watchHtml = await nativeFetch(watchUrl);
-                
-                // 🚀 THE FIX: Self-Healing 404 Handler for Streams
-                if (watchHtml.includes("Error 404") || watchHtml.includes("Page not found")) {
-                    const rawTitle = extractTitleFromUrl(watchUrl);
-                    const searchRes = await Extension.search(rawTitle);
-                    if (searchRes && searchRes.length > 0) {
-                        let bestUrl = getBestSearchMatchUrl(rawTitle, searchRes) || searchRes[0].url;
-                        let foundUrl = bestUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
-                        watchUrl = `${foundUrl}/ep-${epNum}`;
-                        watchHtml = await nativeFetch(watchUrl);
-                    } else {
-                        throw new Error("Could not find episode via search fallback.");
-                    }
-                }
+                    // Fallback just in case Anify directly passes a mapped slug (e.g., "re-zero-season-4/ep-1")
+                    let watchUrl = episodeId;
+                    const epMatch = watchUrl.match(/[-/]ep-(\d+)/i);
+                    epNum = epMatch ? epMatch[1] : "1";
 
-                let animeId = "";
-                const idMatch = watchHtml.match(/data-id="([^"]+)"/) || watchHtml.match(/data-tip="([^"]+)"/);
-                if (idMatch) animeId = idMatch[1];
-                if (!animeId) throw new Error("Could not find Anime ID on watch page.");
+                    if (watchUrl.startsWith("http")) {
+                        let cleanBase = watchUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
+                        targetUrl = `${cleanBase}/ep-${epNum}`;
+                    } else {
+                        let cleanSlug = watchUrl.replace(/(\/ep-\d+|-ep-\d+)+$/i, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                        targetUrl = `${BASE_URL}/watch/${cleanSlug}/ep-${epNum}`;
+                    }
+                    
+                    let watchHtml = await nativeFetch(targetUrl);
+                    
+                    if (watchHtml.includes("Error 404") || watchHtml.includes("Page not found")) {
+                        const rawTitle = extractTitleFromUrl(targetUrl);
+                        const searchRes = await Extension.search(rawTitle);
+                        if (searchRes && searchRes.length > 0) {
+                            let bestUrl = getBestSearchMatchUrl(rawTitle, searchRes) || searchRes[0].url;
+                            let foundUrl = bestUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
+                            targetUrl = `${foundUrl}/ep-${epNum}`;
+                            watchHtml = await nativeFetch(targetUrl);
+                        } else {
+                            throw new Error("Could not find episode via search fallback.");
+                        }
+                    }
+
+                    let animeId = "";
+                    const idMatch = watchHtml.match(/data-id="([^"]+)"/) || watchHtml.match(/data-tip="([^"]+)"/);
+                    if (idMatch) animeId = idMatch[1];
+                    if (!animeId) throw new Error("Could not find Anime ID on watch page.");
+                    
+                    const vrfToken = vrfEncrypt(animeId);
+                    const epsAjax = await nativeFetch(`${BASE_URL}/ajax/episode/list/${animeId}?vrf=${vrfToken}`, {
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "X-Requested-With": "XMLHttpRequest"
+                    });
+                    const epsJson = JSON.parse(epsAjax);
+                    
+                    const parser = new DOMParser();
+                    const epsDoc = parser.parseFromString(epsJson.result || epsJson.html || "", "text/html");
+                    const targetEp = epsDoc.querySelector(`a[data-num="${epNum}"]`);
+                    if (!targetEp) throw new Error("Could not find episode " + epNum + " in API response.");
+                    epIds = targetEp.getAttribute("data-ids");
+                }
                 
-                const vrfToken = vrfEncrypt(animeId);
-                const epsAjax = await nativeFetch(`${BASE_URL}/ajax/episode/list/${animeId}?vrf=${vrfToken}`, {
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "X-Requested-With": "XMLHttpRequest"
-                });
-                const epsJson = JSON.parse(epsAjax);
-                
-                const parser = new DOMParser();
-                const epsDoc = parser.parseFromString(epsJson.result || epsJson.html || "", "text/html");
-                const targetEp = epsDoc.querySelector(`a[data-num="${epNum}"]`);
-                if (!targetEp) throw new Error("Could not find episode " + epNum + " in API response.");
-                const epIds = targetEp.getAttribute("data-ids");
-                
+                // Now we bypass the HTML fetch entirely and grab the servers instantly!
                 const serversAjax = await nativeFetch(`${BASE_URL}/ajax/server/list?servers=${epIds}`, {
                     "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "X-Requested-With": "XMLHttpRequest"
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": targetUrl || BASE_URL
                 });
                 const serversJson = JSON.parse(serversAjax);
+                const parser = new DOMParser();
                 const serversDoc = parser.parseFromString(serversJson.result || serversJson.html || "", "text/html");
                 
                 const serverElements = serversDoc.querySelectorAll('.type li[data-link-id]');
