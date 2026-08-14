@@ -62,6 +62,15 @@ globalThis.Extension = (function() {
         return searchResults[0].url;
     }
 
+    // 🚀 THE FIX: Helper to extract a clean search title if a URL 404s
+    function extractTitleFromUrl(url) {
+        let str = url.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
+        let parts = str.split('/');
+        let slug = parts.pop();
+        if (!slug || slug === "watch" || slug === "anime") slug = parts.pop();
+        return slug.replace(/-/g, ' ').trim();
+    }
+
     return {
         search: async function(query) {
             try {
@@ -92,7 +101,23 @@ globalThis.Extension = (function() {
 
         getEpisodes: async function(animeUrl) {
             try {
-                const responseHtml = await nativeFetch(animeUrl);
+                let targetUrl = animeUrl;
+                let responseHtml = await nativeFetch(targetUrl);
+                
+                // 🚀 THE FIX: Self-Healing 404 Handler
+                // If Anikoto blocks us because we missed the "-0u851" hash, we silently search and fix it.
+                if (responseHtml.includes("Error 404") || responseHtml.includes("Page not found")) {
+                    const query = extractTitleFromUrl(targetUrl);
+                    const searchRes = await Extension.search(query);
+                    if (searchRes && searchRes.length > 0) {
+                        const bestUrl = getBestSearchMatchUrl(query, searchRes);
+                        targetUrl = bestUrl || searchRes[0].url;
+                        responseHtml = await nativeFetch(targetUrl);
+                    } else {
+                        throw new Error("Anime not found in search fallback.");
+                    }
+                }
+
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(responseHtml, "text/html");
                 
@@ -106,7 +131,7 @@ globalThis.Extension = (function() {
                 
                 const ajaxResponse = await nativeFetch(ajaxUrl, {
                     "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Referer": animeUrl,
+                    "Referer": targetUrl,
                     "X-Requested-With": "XMLHttpRequest"
                 });
                 
@@ -151,19 +176,26 @@ globalThis.Extension = (function() {
                     let cleanBase = watchUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
                     watchUrl = `${cleanBase}/ep-${epNum}`;
                 } else {
-                    let rawTitle = watchUrl.replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
-                    const searchResults = await Extension.search(rawTitle);
-                    if (searchResults && searchResults.length > 0) {
-                        let bestUrl = getBestSearchMatchUrl(rawTitle, searchResults) || searchResults[0].url;
-                        let foundUrl = bestUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
-                        watchUrl = `${foundUrl}/ep-${epNum}`;
-                    } else {
-                        let cleanSlug = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-                        watchUrl = `${BASE_URL}/watch/${cleanSlug}/ep-${epNum}`;
-                    }
+                    let cleanSlug = watchUrl.replace(/(\/ep-\d+|-ep-\d+)+$/i, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                    watchUrl = `${BASE_URL}/watch/${cleanSlug}/ep-${epNum}`;
                 }
                 
-                const watchHtml = await nativeFetch(watchUrl);
+                let watchHtml = await nativeFetch(watchUrl);
+                
+                // 🚀 THE FIX: Self-Healing 404 Handler for Streams
+                if (watchHtml.includes("Error 404") || watchHtml.includes("Page not found")) {
+                    const rawTitle = extractTitleFromUrl(watchUrl);
+                    const searchRes = await Extension.search(rawTitle);
+                    if (searchRes && searchRes.length > 0) {
+                        let bestUrl = getBestSearchMatchUrl(rawTitle, searchRes) || searchRes[0].url;
+                        let foundUrl = bestUrl.split('?')[0].replace(/(\/ep-\d+|-ep-\d+)+$/i, '');
+                        watchUrl = `${foundUrl}/ep-${epNum}`;
+                        watchHtml = await nativeFetch(watchUrl);
+                    } else {
+                        throw new Error("Could not find episode via search fallback.");
+                    }
+                }
+
                 let animeId = "";
                 const idMatch = watchHtml.match(/data-id="([^"]+)"/) || watchHtml.match(/data-tip="([^"]+)"/);
                 if (idMatch) animeId = idMatch[1];
@@ -219,7 +251,6 @@ globalThis.Extension = (function() {
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                         };
 
-                        // 🚀 KOTLIN PARITY FIX 1: MewCDN Fragment Decoding
                         if (embedUrl.includes("mewcdn.online/player/plyr.php")) {
                             const fragment = embedUrl.split('#')[1];
                             if (fragment) {
@@ -244,7 +275,6 @@ globalThis.Extension = (function() {
                             continue;
                         }
                         
-                        // 🚀 KOTLIN PARITY FIX 2: Strict Data-ID Body Regex
                         const embedHtml = await nativeFetch(embedUrl, { "Referer": BASE_URL + "/" });
                         const dataIdMatch = embedHtml.match(/data-id="([^"]+)"/);
                         let data = {};
@@ -253,12 +283,10 @@ globalThis.Extension = (function() {
                             const dataId = dataIdMatch[1];
                             const streamType = isDub ? "dub" : "sub";
                             
-                            // Strategy A: getSources
                             let apiUrl = `${embedHost}/stream/getSources?id=${dataId}&id=${dataId}`;
                             let apiResponse = await nativeFetch(apiUrl, { "Accept": "*/*", "X-Requested-With": "XMLHttpRequest", "Referer": embedUrl, "Origin": embedHost });
                             try { data = JSON.parse(apiResponse); } catch(e) {}
                             
-                            // Strategy B: getSourcesNew Fallback
                             if (!data || (!data.sources && !data.file && !data.url && !data.result)) {
                                 apiUrl = `${embedHost}/stream/getSourcesNew?id=${dataId}&id=${dataId}&type=${streamType}&type=${streamType}`;
                                 apiResponse = await nativeFetch(apiUrl, { "Accept": "*/*", "X-Requested-With": "XMLHttpRequest", "Referer": embedUrl, "Origin": embedHost });
@@ -266,7 +294,6 @@ globalThis.Extension = (function() {
                             }
                         }
 
-                        // 🚀 KOTLIN PARITY FIX 3: Direct m3u8 Regex Brute-Force
                         if (!data || (!data.sources && !data.file && !data.url && !data.result)) {
                             const directM3u8Match = embedHtml.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
                             if (directM3u8Match) {
